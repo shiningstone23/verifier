@@ -1,0 +1,43 @@
+seed: 42
+
+dataset:
+  seq_length: 64
+  eos_token_id: 0
+
+qt:
+  load_in_8bit: true
+
+model:
+  llama-1b:
+    device_map: "auto"
+  llama-8b:
+    device_map: "auto"
+
+lora:
+  r: 16  # Rank for the low-rank matrices
+  lora_alpha: 32  # Scaling factor
+  lora_dropout: 0.1  # Dropout probability for LoRA layers
+  bias: "none"  # How biases are handled
+  task_type: "CAUSAL_LM"  # Sequence-to-sequence task for language modeling
+
+trainer:
+  seed: 42
+  data_seed: 42
+  output_dir: "./models/checkpoints"
+  eval_strategy: "epoch"
+  save_strategy: "epoch"
+  logging_strategy: "steps"
+  logging_steps: 50
+  learning_rate: 2e-5
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  num_train_epochs: 50
+  weight_decay: 0.01
+  save_total_limit: 2
+  max_seq_length: 512
+  logging_dir: "./models/logs"
+
+generator:
+  max_length: 1024
+  min_new_tokens: 64
+  num_beam: 4
