@@ -1,4 +1,5 @@
 import argparse
+from dotenv import load_dotenv; load_dotenv(override=True)
 import yaml
 from transformers import (
     BitsAndBytesConfig,
@@ -11,7 +12,7 @@ from peft import get_peft_model, LoraConfig
 
 from utils import HF_NAME_MAP
 from utils import Logger
-from utils import set_seed, validate_args
+from utils import set_seed, validate_args, formatting_func
 
 if __name__ == '__main__':
     logger = Logger(__name__)
@@ -41,22 +42,15 @@ if __name__ == '__main__':
 
     # Load data
     if args.task_name == "gsm8k":
-        # TODO : GO to util.py and add the following function
-        def formatting_func(item):
-            question, answer = item['question'], item['answer']
-            return f"Question: {question} \nAnswer: {answer}"
-        
         _dataset = load_dataset("openai/gsm8k", "main")
         train_dataset = ConstantLengthDataset(
             tokenizer=tokenizer,
-            # dataset=_dataset['train'].select(range(400)),
             dataset=_dataset['train'],
             formatting_func=formatting_func,
             **config['dataset']
         )
         eval_dataset = ConstantLengthDataset(
             tokenizer=tokenizer,
-            # dataset=_dataset['test'].select(range(100)),
             dataset=_dataset['test'],
             formatting_func=formatting_func,
             **config['dataset']
@@ -71,6 +65,7 @@ if __name__ == '__main__':
 
     # Trainer setup
     config['trainer']['learning_rate'] = float(config['trainer']['learning_rate'])
+    config['trainer']['output_dir'] = config['trainer']['output_dir'] + f"/sft_{args.pt_name}_{args.task_name}"
     trainer = SFTTrainer(
         model=peft_model,
         args=SFTConfig(**config['trainer']), # TODO : Fix why the logging is not working

@@ -1,7 +1,9 @@
+import re
 import random
 import numpy as np
 import torch
 import logging
+from transformers import StoppingCriteria
 
 # ENUMS
 HF_NAME_MAP = {
@@ -56,6 +58,20 @@ class Evaluator:
             "ground_truths": []
         }
 
+    def extract_answer(self, prediction, ground_truth):
+        if len(prediction) != len(ground_truth):
+            raise ValueError("Prediction and Ground Truth should have the same length")
+        
+        predicted_answer = []
+        gt_number = []
+        for pred, gt in zip(prediction, ground_truth):
+            pn, gn = _extract_answer(pred, gt)
+
+            predicted_answer.append(pn)
+            gt_number.append(gn)
+
+        return predicted_answer, gt_number
+
     def evaluate(self):
         if len(self.data["predictions"]) == 0:
             return 0, []
@@ -67,17 +83,9 @@ class Evaluator:
         correct = 0
         details = []
 
-        for pred, gt in zip(predictions, ground_truths):
-            # Check if '###' is present in the prediction
-            if '###' in pred:
-                # Extract the answer part after '###'
-                predicted_answer = pred.split('###')[-1].strip()
-            else:
-                # If '###' is not present, it's an incorrect prediction
-                predicted_answer = None
-
-            # Compare the extracted answer with the ground truth
-            is_correct = predicted_answer == gt.strip()
+        predicted_answer, gt_number = self.extract_answer(predictions, ground_truths)
+        for pred, gt in zip(predicted_answer, gt_number):
+            is_correct = pred == gt
 
             # Increment the correct count if the answer matches
             if is_correct:
@@ -87,7 +95,7 @@ class Evaluator:
             details.append({
                 'prediction': pred,
                 'predicted_answer': predicted_answer,
-                'ground_truth': gt,
+                'ground_truth': gt_number,
                 'is_correct': is_correct
             })
 
@@ -95,7 +103,38 @@ class Evaluator:
         accuracy = correct / total * 100 if total > 0 else 0
 
         return accuracy, details
+    
+class RegexStopAndExtractCriteria(StoppingCriteria):
+    def __init__(self, pattern, tokenizer):
+        super().__init__()
+        self.pattern = pattern  # 정규표현식 패턴
+        self.tokenizer = tokenizer
+        self.extracted_value = None  # 추출한 값을 저장할 변수
 
+    def __call__(self, input_ids, scores, **kwargs):
+        # 생성된 텍스트를 디코딩
+        decoded_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        # 정규표현식 패턴을 이용해 매칭 확인
+        match = re.search(self.pattern, decoded_text)
+        if match:
+            self.extracted_value = match.group(1)  # 숫자 부분 추출
+            return True  # 패턴이 매칭되면 멈춤
+        return False  # 패턴이 매칭되지 않으면 계속 생성
+
+def _extract_answer(prediction, ground_truth):
+    pn = None
+    matched = re.search(r'####\s*\d+', prediction)
+    if matched:
+        try:
+            pn = matched.group(0).split('####')[-1].strip()
+            _ = int(pn)
+        except ValueError:
+            pass
+
+    # Compare the extracted answer with the ground truth
+    gn = re.search(r'####\s*\d+', ground_truth).group(0).split('####')[-1].strip()
+
+    return pn, gn
 
 # FUNCTIONS
 def set_seed(seed):
@@ -116,3 +155,8 @@ def init_tokenizer(tokenizer):
 def validate_args(args):
     # TODO
     pass
+
+def formatting_func(item):
+    instruction = "Please calculate the solution step-by-step and conclude the answer with '\n#### ' followed by the result.\n"
+    question, answer = item['question'], item['answer']
+    return f"{instruction}Question: {question} \nAnswer: {answer}"
