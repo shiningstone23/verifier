@@ -3,7 +3,7 @@ import random
 import numpy as np
 import torch
 import logging
-from transformers import StoppingCriteria
+from transformers import StoppingCriteria, LogitsProcessor
 
 # ENUMS
 HF_NAME_MAP = {
@@ -120,6 +120,38 @@ class RegexStopAndExtractCriteria(StoppingCriteria):
             self.extracted_value = match.group(1)  # 숫자 부분 추출
             return True  # 패턴이 매칭되면 멈춤
         return False  # 패턴이 매칭되지 않으면 계속 생성
+    
+
+class RegexLogitsProcessor(LogitsProcessor):
+    def __init__(self, pattern, tokenizer):
+        """
+        Args:
+            pattern (str): 탐지할 정규식 패턴.
+            tokenizer (Tokenizer): 토크나이저 객체.
+        """
+        self.pattern = pattern
+        self.tokenizer = tokenizer
+
+    def __call__(self, input_ids, scores):
+        """
+        Args:
+            input_ids (torch.Tensor): (n_samples, seq_len) 형태의 입력 토큰 ID.
+            scores (torch.Tensor): (n_samples, n_vocab) 형태의 로그 확률 점수.
+
+        Returns:
+            torch.Tensor: 수정된 로그 확률 점수.
+        """
+        pad_token = self.tokenizer.pad_token_id
+
+        for i in range(input_ids.size(0)):
+            # 전체 시퀀스를 디코딩
+            decoded = self.tokenizer.decode(input_ids[i])
+            # 패턴이 디코딩된 텍스트에서 발견되면 처리
+            if re.search(self.pattern, decoded):
+                scores[i, :] = -1e9  # 모든 토큰 비활성화
+                scores[i, pad_token] = 0  # pad_token만 활성화
+
+        return scores
 
 def _extract_answer(prediction, ground_truth):
     pn = None
@@ -132,7 +164,7 @@ def _extract_answer(prediction, ground_truth):
             pass
 
     # Compare the extracted answer with the ground truth
-    gn = re.search(r'####\s*\d+', ground_truth).group(0).split('####')[-1].strip()
+    gn = re.search(r'####\s*-?\d+', ground_truth).group(0).split('####')[-1].strip()
 
     return pn, gn
 

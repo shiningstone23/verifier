@@ -1,6 +1,6 @@
 import os
 import argparse
-from dotenv import load_dotenv; load_dotenv(override=True)
+# from dotenv import load_dotenv; load_dotenv(override=True)
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 import yaml
@@ -12,7 +12,7 @@ from transformers import (
 )
 from trl import SFTConfig, SFTTrainer
 from trl.trainer import ConstantLengthDataset
-from datasets import Dataset, load_dataset, concatenate_datasets
+from datasets import load_from_disk, load_dataset, concatenate_datasets
 from peft import get_peft_model, LoraConfig
 
 from utils import HF_NAME_MAP
@@ -27,7 +27,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, help='Model to train', default=f"sft_llama-8b")
     parser.add_argument('--task_name', type=str, help='Task to train on', default='gsm8k')
     parser.add_argument('--config_path', type=str, help='Path to config file', default='configs/basic.yml')
-    parser.add_argument('--max_iter', type=int, help='Maximum number of iterations', default=3)
+    parser.add_argument('--iter_num', type=int, help='Iteration number', default=0)
     args = parser.parse_args()
     validate_args(args)
 
@@ -55,7 +55,6 @@ if __name__ == '__main__':
         model, 
         peft_config=LoraConfig(**config['lora'])
     )
-    # model.forward = th_compile(model.forward, mode="reduce-overhead", fullgraph=True)
 
 
     # Load data
@@ -64,7 +63,7 @@ if __name__ == '__main__':
 
     eval_dataset = ConstantLengthDataset(
         tokenizer=tokenizer,
-        dataset=_dataset['test'].select(range(4)),
+        dataset=_dataset['test'],
         formatting_func=formatting_func,
         **config['dataset']
     )
@@ -81,90 +80,37 @@ if __name__ == '__main__':
         RegexStopAndExtractCriteria(pattern=r"####\s*\d+(\D)", tokenizer=tokenizer)
     ])
 
-    for _iter in range(args.max_iter):
-        logger.info(f"Starting iteration {_iter}")
-        
-        augmented_correct = {
-            "question": [],
-            "answer": []
-        }
-        augmented_false = {
-            "question": [],
-            "answer": []
-        }
+    _iter = args.iter_num
+    cnt = config['sampling']['max_samples'][args.model_name]
+    correct_dset = load_from_disk(f"data/{args.model_name}_{args.task_name}_correct_{cnt}_{_iter}")
+    for i in range(1,_iter+1):
+        new_dataset = load_from_disk(f"data/{args.model_name}_{args.task_name}_correct_{cnt}_{i}")
+        correct_dset = concatenate_datasets([correct_dset, new_dataset])
 
-        prev_path = f"data/{args.model_name}_{args.task_name}_correct_{_iter-1}"
-        if os.path.exists(prev_path):
-            new_dataset = load_dataset(prev_path)
-            _dataset = concatenate_datasets([_dataset, new_dataset])
+    train_dataset = ConstantLengthDataset(
+        tokenizer=tokenizer,
+        dataset=concatenate_datasets([_dataset['train'], correct_dset]),
+        formatting_func=formatting_func,
+        **config['dataset']
+    )
 
-        loader = DataLoader(_dataset['train'].select(range(10)), batch_size=1, shuffle=False)
-        # loader = DataLoader(_dataset['train'].select(range(4)), batch_size=1, shuffle=False)
+    config['trainer']['learning_rate'] = float(config['trainer']['learning_rate'])
+    trainer = SFTTrainer(
+        model=peft_model,
+        args=SFTConfig(**config['star_trainer']),
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+    )
 
-        for ditem in tqdm(loader):
-            question, answer = ditem['question'], ditem['answer']
-            question = [f"{instruction}Question: {q}" for q in question]
-            question = tokenizer(
-                question, padding=True, truncation=True, return_tensors="pt", max_length=512
-            )
-            prediction = model.generate(
-                inputs=question['input_ids'].to(model.device),
-                attention_mask=question['attention_mask'].to(model.device),
-                generation_config=gen_config,
-                stopping_criteria=stopping_criteria
-            )
+    # Fine-tune the model
+    trainer.train()
 
-            generated = prediction[:, question['input_ids'].shape[1]:]
-            prediction = tokenizer.batch_decode(generated, skip_special_tokens=True)
-            pred_ans, gt_ans = evaluator.extract_answer(prediction, answer)
-            is_correct = [pn==gn for pn, gn in zip(pred_ans, gt_ans)]
+    # Save
+    trainer.save_model(
+        f"models/{args.model_name}_{args.task_name}_star_{_iter}"
+    )
 
-            for i in range(len(is_correct)):
-                q = question['input_ids'][i]
-                ic = is_correct[i]
-                pred = prediction[i]
-                pn = pred_ans[i]
-                if ic:
-                    augmented_correct["question"].append(q)
-                    augmented_correct["answer"].append(pred.split("Answer:")[-1].strip())
-                else:
-                    if pn is not None:
-                        augmented_false["question"].append(q)
-                        augmented_false["answer"].append(pred.split("Answer:")[-1].strip())
-
-        correct_dset = Dataset.from_dict(augmented_correct)
-        false_dset = Dataset.from_dict(augmented_false)
-        logger.info(f"Save augmented data : correct: {len(correct_dset)}, false: {len(false_dset)}")
-        logger.info(f"Path : data/{args.model_name}_{args.task_name}_correct_{_iter}")
-
-        correct_dset.save_to_disk(f"data/{args.model_name}_{args.task_name}_correct_{_iter}")
-        false_dset.save_to_disk(f"data/{args.model_name}_{args.task_name}_false_{_iter}")
-
-        train_dataset = ConstantLengthDataset(
-            tokenizer=tokenizer,
-            # dataset=concatenate_datasets([_dataset['train'], correct_dset]),
-            dataset=concatenate_datasets([_dataset['train'].select(range(10)), correct_dset]),
-            formatting_func=formatting_func,
-            **config['dataset']
-        )
-
-        config['trainer']['learning_rate'] = float(config['trainer']['learning_rate'])
-        trainer = SFTTrainer(
-            model=peft_model,
-            args=SFTConfig(**config['star_trainer']),
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-        )
-
-        # Fine-tune the model
-        trainer.train()
-
-        # Save
-        trainer.save_model(
-            f"models/{args.model_name}_{args.task_name}_star_{_iter}"
-        )
-
-        logger.info(f"STAR Finetuning complete for iteration {_iter}")
+    logger.info(f"STAR Finetuning complete for iteration {_iter}")
 
         # print(f"Question: {ditem['question']}", flush=True)
         # print(f"Prediction: {prediction}", flush=True)

@@ -40,12 +40,24 @@ trainer:
 generator:
   max_length: 1024
   num_beam: 1
-  # cache_implementation: "static"
+
+veri_generator:
+  max_length: 1024
+  top_k: 50
+  top_p: 0.95
+  do_sample: true
+  num_return_sequences: 16
+  num_beam: 1
 
 gen_cache:
   static:
     batch_size: 1
     max_cache_len: 1024
+
+sampling:
+  max_samples:
+    sft_llama-1b: 200
+    sft_llama-8b: 100
 
 star_trainer:
   seed: 42
@@ -56,10 +68,34 @@ star_trainer:
   logging_strategy: "steps"
   logging_steps: 50
   learning_rate: 0.00002
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
-  num_train_epochs: 50
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  num_train_epochs: 1
   weight_decay: 0.01
   save_total_limit: 2
   max_seq_length: 512
   logging_dir: "./models/star/logs"
+
+dpo_trainer:
+  beta: 0.1
+  loss_type: "sigmoid"
+  seed: 42
+  data_seed: 42
+  output_dir: "./models/verifier/checkpoints"
+  eval_strategy: "epoch"
+  save_strategy: "steps"
+  save_steps: 200
+  save_total_limit: 2
+  logging_strategy: "steps"
+  logging_steps: 50
+  learning_rate: 0.00002
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  num_train_epochs: 3
+  weight_decay: 0.01
+  max_prompt_length: 256
+  max_length: 512
+  remove_unused_columns: false
+  model_adapter_name: "target"
+  ref_adapter_name: "reference"
+  logging_dir: "./models/verifier/logs"

@@ -1,20 +1,18 @@
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import argparse
-from dotenv import load_dotenv; load_dotenv(override=True)
-from tqdm import tqdm
-from torch.utils.data import DataLoader
 import yaml
 from transformers import (
     BitsAndBytesConfig,
     AutoModelForCausalLM, AutoTokenizer,
 )
 from trl import DPOConfig, DPOTrainer
-from trl.trainer import ConstantLengthDataset
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_from_disk
+from peft import PeftModel
 
 from utils import HF_NAME_MAP
 from utils import Logger
-from utils import set_seed, init_tokenizer, validate_args, formatting_func
+from utils import set_seed, init_tokenizer, validate_args
 
 if __name__ == '__main__':
     logger = Logger(__name__)
@@ -23,7 +21,6 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, help='Model to train', default=f"sft_llama-1b")
     parser.add_argument('--task_name', type=str, help='Task to train on', default='gsm8k')
     parser.add_argument('--config_path', type=str, help='Path to config file', default='configs/basic.yml')
-    parser.add_argument('--max_iter', type=int, help='Maximum number of iterations', default=3)
     args = parser.parse_args()
     validate_args(args)
 
@@ -42,68 +39,42 @@ if __name__ == '__main__':
     tokenizer = AutoTokenizer.from_pretrained(hf_name)
     init_tokenizer(tokenizer)
     model = AutoModelForCausalLM.from_pretrained(
-        model_path,
+        hf_name,
         quantization_config=BitsAndBytesConfig(**config['qt']),
         **config['model'][pt_name]
     )
-    # model.forward = th_compile(model.forward, mode="reduce-overhead", fullgraph=True)
 
+    model = PeftModel.from_pretrained(
+        model, 
+        model_id=model_path,
+        is_trainable=True,
+        adapter_name="target",
+    )
+    model.load_adapter(model_path, adapter_name="reference")
 
     # Load data
-    max_iter = 0
     if args.task_name == "gsm8k":
-        dataset = load_dataset("openai/gsm8k", "main")
-        def func(x):
-            x['label'] = 1
+        train_dataset = load_from_disk(f"data/ver_{args.model_name}_{args.task_name}/train")
+        eval_dataset = load_from_disk(f"data/ver_{args.model_name}_{args.task_name}/test")
 
-        dataset['train'].map(label=lambda x : 1)
-        for dir_name in os.listdir("data"):
-            logger.info(f"Find data for training verifier : {dir_name}")
-            if args.model_name in dir_name:
-                if "correct" in dir_name:
-                    _dataset = load_dataset(f"data/{dir_name}")
-                    _dataset.map(label=lambda x : 1)
-                else:
-                    _dataset = load_dataset(f"data/{dir_name}")
-                    _dataset.map(label=lambda x : 0)
+    config['dpo_trainer']['learning_rate'] = float(config['dpo_trainer']['learning_rate'])
+    config['dpo_trainer']['output_dir'] = config['dpo_trainer']['output_dir'] + f"/veri_{args.model_name}_{args.task_name}"
 
-                _iter = int(dir_name.split("_")[-1])
-                if _iter >= max_iter:
-                    max_iter = _iter
-
-                logger.info(f"Dataset size : {_dataset.num_rows}")
-                dataset['train'] = concatenate_datasets([dataset['train'], _dataset])
-
-        
-        train_dataset = ConstantLengthDataset(
-            tokenizer=tokenizer,
-            # dataset=_dataset['train'].select(range(400)),
-            dataset=dataset['train'],
-            formatting_func=formatting_func,
-            **config['dataset']
-        )
-        eval_dataset = ConstantLengthDataset(
-            tokenizer=tokenizer,
-            # dataset=_dataset['test'].select(range(100)),
-            dataset=dataset['test'],
-            formatting_func=formatting_func,
-            **config['dataset']
-        )
-
-    config['trainer']['learning_rate'] = float(config['trainer']['learning_rate'])
     trainer = DPOTrainer(
         model=model,
+        tokenizer=tokenizer,
         args=DPOConfig(**config['dpo_trainer']), # TODO : Fix why the logging is not working
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
     )
 
     # Fine-tune the model
+    # trainer.train(resume_from_checkpoint=True)
     trainer.train()
 
     # Save
     trainer.save_model(
-        f"models/veri_{args.pt_name}_{args.task_name}_{max_iter}"
+        f"models/veri_{args.model_name}_{args.task_name}",
     )
 
     logger.info('Complete Training Verifier')
