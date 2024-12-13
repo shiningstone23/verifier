@@ -1,4 +1,4 @@
-import os ; os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+import os ; os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import json
 import argparse
 from tqdm import tqdm
@@ -14,23 +14,30 @@ from utils import Logger
 from utils import set_seed, init_tokenizer, validate_args, _extract_answer
 
 def is_answer(answer, pred):
-            pn, gn = _extract_answer(pred, answer)
-            return pn == gn
+    pn, gn = _extract_answer(pred, answer)
+    return pn == gn
 
-def get_likelihood(model, tokenizer, question, predictions, answer):
+def get_likelihood(verifier, tokenizer, question, predictions, answer, logger):
     instruction = ""
     questions = [instruction + question + pred for pred in predictions]
 
     # Step 2: Tokenize 입력 배치
-    batch_inputs = tokenizer(questions, return_tensors='pt', padding=True, padding_side='right')
+    batch_inputs = tokenizer(questions, return_tensors='pt', padding=True, padding_side='right', max_length=896, truncation=True)
     attention_mask = batch_inputs["attention_mask"]
 
 
     # Step 3: Tokenize 정답 레이블 (패딩 포함)
-    label_tokens = tokenizer(predictions, return_tensors="pt", padding=True, padding_side='right')
+    label_tokens = tokenizer(predictions, return_tensors="pt", padding=True, padding_side='right', max_length=896, truncation=True)
+
+    info = {
+        "batch_inputs": batch_inputs.input_ids.shape,
+        "label_tokens": label_tokens.input_ids.shape
+    }
+    logger.info(f"Info: {info}")
 
     # Step 4: Verifier 모델 호출 (배치 처리)
-    logits = verifier(batch_inputs.input_ids, attention_mask=attention_mask).logits.detach().cpu()
+    with torch.no_grad():
+        logits = verifier(batch_inputs.input_ids, attention_mask=attention_mask).logits
 
     # Step 5: Mask 생성 및 로그 확률 계산
     label_mask = (label_tokens.input_ids != tokenizer.pad_token_id)  # 패딩이 아닌 부분은 True
@@ -46,7 +53,7 @@ def get_likelihood(model, tokenizer, question, predictions, answer):
     masked_log_probs = log_probs * label_mask[:, 1:].float()  # 첫 번째 패딩 제외
     total_log_probs = masked_log_probs.sum(dim=1)  # 배치별 로그 확률 합계
 
-    return total_log_probs
+    return total_log_probs.detach().cpu()
 
 
 
@@ -81,35 +88,48 @@ if __name__ == '__main__':
         verifier_path,
         quantization_config=BitsAndBytesConfig(**config['qt']),
         **config['model'][pt_name]
-    )
+    ).eval()
 
     with open(f"data/{args.eval_set}.json", "r") as f:
         samples = json.load(f)
 
-    _iter = 0
+    cnt = 0
     n_correct = 0
     for ditem in tqdm(samples):
-        question = ditem['Question'][0]
-        predictions = ditem['Prediction']
-        answer = ditem['Answer'][0]
+        try:
+            question = ditem['Question'][0]
+            predictions = ditem['Prediction']
+            answer = ditem['Answer'][0]
 
-        likelihood = get_likelihood(verifier, tokenizer, question, predictions, answer)
-        ans_idx = likelihood.argmax()
-        pred = predictions[ans_idx]
+            # likelihood = []
+            # for pred in predictions:
+            #     _likelihood = get_likelihood(verifier, tokenizer, question, pred, answer)
+            # likelihood.append(_likelihood)
+            # likelihood = torch.stack(likelihood, dim=0)
+            logger.info("\n")
+            likelihood = get_likelihood(verifier, tokenizer, question, predictions, answer, logger)
 
-        is_answer_list = [is_answer(answer, pred) for pred in predictions]
-        total_num_answer = sum(is_answer_list)
+            ans_idx = likelihood.argmax()
+            pred = predictions[ans_idx]
 
-        logger.info("\n")
-        logger.info(f"Question: {question}")
-        logger.info(f"Answer: {answer}")
-        logger.info(f"Correct answers: {is_answer_list}")
-        logger.info(f"Number of correct answers: {total_num_answer}")
-        logger.info(f"Best answer index: {ans_idx}")
-        logger.info(f"Is Verifier Correct: {is_answer_list[ans_idx]}")
-        logger.info(f"Best Pred: {predictions[ans_idx]}")
-        logger.info(f"Likelihood: {likelihood}")
+            is_answer_list = [is_answer(answer, pred) for pred in predictions]
+            total_num_answer = sum(is_answer_list)
+            is_verifier_correct = is_answer_list[ans_idx]
+            n_correct += int(is_verifier_correct)
 
-        _iter += 1
+            logger.info(f"Question: {question}")
+            logger.info(f"Answer: {answer}")
+            logger.info(f"Correct answers: {is_answer_list}")
+            logger.info(f"Number of correct answers: {total_num_answer}")
+            logger.info(f"Best answer index: {ans_idx}")
+            logger.info(f"Is Verifier Correct: {is_verifier_correct}")
+            logger.info(f"Best Pred: {predictions[ans_idx]}")
+            logger.info(f"Likelihood: {likelihood}")
+            logger.info(f"Accurracy: {n_correct / (cnt+1) * 100:.2f}%")
+            cnt += 1
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            continue
+
     
         
